@@ -597,7 +597,18 @@ export default function TradeManager({ setError, bots = [] }) {
             const entryTs = entryOf(p, new Date(8.64e15));
             return entryTs ? { start: entryTs.getTime(), end: Infinity } : null;
         }).filter(Boolean);
-        const longestFlat = longestFlatGap([...spans, ...openSpans], dateFrom, dateTo);
+        // Window edges: the user's date filter, else the data range the engine
+        // walked in the last backtest of the bots in view (so the stretch before
+        // the first trade counts too)
+        let dataFrom = null, dataTo = null;
+        for (const name of filteredBotNames) {
+            const s = bots.find(b => b.name === name)?.settings?.last_backtest_summary;
+            const f = s?.data_from ? new Date(s.data_from).getTime() : NaN;
+            const t = s?.data_to ? new Date(s.data_to).getTime() : NaN;
+            if (!Number.isNaN(f) && (dataFrom === null || f < dataFrom)) dataFrom = f;
+            if (!Number.isNaN(t) && (dataTo === null || t > dataTo)) dataTo = t;
+        }
+        const longestFlat = longestFlatGap([...spans, ...openSpans], dateFrom ?? dataFrom, dateTo ?? dataTo);
 
         // Return/Risk (simplified Sharpe)
         const returns = closedPositions.map(p => p.profit_pct || 0);
@@ -619,6 +630,7 @@ export default function TradeManager({ setError, bots = [] }) {
             wins: wins.length,
             losses: losses.length,
             total: closedPositions.length,
+            openCount: activePositions.length,
             profitFactor,
             maxDDpct,
             avgHoldMs,
@@ -963,9 +975,10 @@ export default function TradeManager({ setError, bots = [] }) {
             </div>
 
             {/* ── STATS GRID ─────────────────────────────────────────────────── */}
+            {/* Row 1: result · Row 2: trade quality · Row 3: per-trade behaviour */}
             {initialLoading ? (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {Array.from({ length: 11 }).map((_, i) => <Skeleton key={i} className="h-[88px] w-full rounded-lg" />)}
+                    {Array.from({ length: 12 }).map((_, i) => <Skeleton key={i} className="h-[88px] w-full rounded-lg" />)}
                 </div>
             ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -982,18 +995,6 @@ export default function TradeManager({ setError, bots = [] }) {
                         color="gold"
                     />
                     <StatCard
-                        label="Win Rate"
-                        value={`${safeNum(stats.winRate, 1)}%`}
-                        sub={`${stats.wins} wins / ${stats.losses} losses`}
-                        color="cyan"
-                    />
-                    <StatCard
-                        label="Profit Factor"
-                        value={stats.profitFactor >= 999 ? '∞' : safeNum(stats.profitFactor)}
-                        sub="gross profit / gross loss"
-                        color="gold"
-                    />
-                    <StatCard
                         label="Max Drawdown"
                         value={engineDrawdown !== null
                             ? `-${safeNum(engineDrawdown, 1)}%`
@@ -1003,6 +1004,38 @@ export default function TradeManager({ setError, bots = [] }) {
                             : 'closed trades only — intra-trade dips not included'}
                         color="red"
                     />
+                    <StatCard
+                        label="Return / Risk"
+                        value={stats.total > 1 ? safeNum(stats.sharpe) : '—'}
+                        sub="mean return ÷ std dev"
+                        color={stats.sharpe > 1 ? 'green' : stats.sharpe > 0 ? 'gold' : 'red'}
+                    />
+
+                    <StatCard
+                        label="Trades"
+                        value={stats.total > 0 ? stats.total : '—'}
+                        sub={stats.openCount > 0 ? `closed · ${stats.openCount} open now` : 'closed'}
+                        color="white"
+                    />
+                    <StatCard
+                        label="Win Rate"
+                        value={stats.total > 0 ? `${safeNum(stats.winRate, 1)}%` : '—'}
+                        sub={`${stats.wins} wins / ${stats.losses} losses`}
+                        color="cyan"
+                    />
+                    <StatCard
+                        label="Profit Factor"
+                        value={stats.total > 0 ? (stats.profitFactor >= 999 ? '∞' : safeNum(stats.profitFactor)) : '—'}
+                        sub="gross profit / gross loss"
+                        color="gold"
+                    />
+                    <StatCard
+                        label="Total Fees Paid"
+                        value={stats.total > 0 ? `-$${safeNum(stats.totalFees)}` : '—'}
+                        sub="all linked orders"
+                        color={stats.totalFees > 0 ? 'red' : 'white'}
+                    />
+
                     <StatCard
                         label="Avg Win"
                         value={stats.wins > 0 ? `+$${safeNum(stats.avgWin)}` : '—'}
@@ -1026,20 +1059,8 @@ export default function TradeManager({ setError, bots = [] }) {
                         value={stats.longestFlat ? formatHoldTime(stats.longestFlat.ms) : '—'}
                         sub={stats.longestFlat
                             ? `${fmtShortDate(stats.longestFlat.from)} – ${fmtShortDate(stats.longestFlat.to)}`
-                            : 'no gap between positions'}
+                            : 'never flat in this range'}
                         color="white"
-                    />
-                    <StatCard
-                        label="Total Fees Paid"
-                        value={stats.total > 0 ? `-$${safeNum(stats.totalFees)}` : '—'}
-                        sub="all linked orders"
-                        color={stats.totalFees > 0 ? 'red' : 'white'}
-                    />
-                    <StatCard
-                        label="Return / Risk"
-                        value={stats.total > 1 ? safeNum(stats.sharpe) : '—'}
-                        sub="mean return ÷ std dev"
-                        color={stats.sharpe > 1 ? 'green' : stats.sharpe > 0 ? 'gold' : 'red'}
                     />
                 </div>
             )}

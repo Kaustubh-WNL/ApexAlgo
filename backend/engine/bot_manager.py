@@ -1211,6 +1211,10 @@ class BotManager:
                         "entries_blocked_days": round(bt_blocked_secs / 86400, 1),
                         "entries_blocked_count": bt_block_count,
                         "candles": sum(len(c["df"]) for c in sym_contexts),
+                        # Data range the backtest walked — lets the analytics page
+                        # measure flat periods before the first / after the last trade
+                        "data_from": timeline[0][0].isoformat() if timeline else None,
+                        "data_to": timeline[-1][0].isoformat() if timeline else None,
                         "finished_at": datetime.now(timezone.utc).isoformat(),
                     }
                     bot.settings = {**bot.settings, "last_backtest_max_drawdown": round(bt_max_dd, 2), "last_backtest_summary": summary}
