@@ -31,6 +31,31 @@ const formatHoldTime = (ms) => {
     return `${totalMins}m`;
 };
 
+// Longest stretch with no position open at all — sample-size context for a low
+// trade count (a selective strategy vs. one whose market never showed up).
+// Overlapping positions (multi-pair) are merged first; the window edges only
+// count when the user has set a date range, otherwise the true start/end of
+// the data is unknown and only gaps between trades are considered.
+const longestFlatGap = (intervals, windowFrom, windowTo) => {
+    const sorted = intervals.filter(i => i.end > i.start).sort((a, b) => a.start - b.start);
+    if (sorted.length === 0) return null;
+    const merged = [];
+    for (const i of sorted) {
+        const last = merged[merged.length - 1];
+        if (last && i.start <= last.end) last.end = Math.max(last.end, i.end);
+        else merged.push({ start: i.start, end: i.end });
+    }
+    let best = null;
+    const consider = (from, to) => {
+        if (to - from > (best?.ms || 0)) best = { ms: to - from, from, to };
+    };
+    if (windowFrom !== null && windowFrom < merged[0].start) consider(windowFrom, merged[0].start);
+    for (let k = 1; k < merged.length; k++) consider(merged[k - 1].end, merged[k].start);
+    const lastEnd = merged[merged.length - 1].end;
+    if (windowTo !== null && windowTo > lastEnd) consider(lastEnd, windowTo);
+    return best;
+};
+
 const pnlColor = (v) => (v >= 0 ? 'text-success' : 'text-danger');
 const pnlSign = (v) => (v >= 0 ? '+' : '');
 
@@ -545,22 +570,34 @@ export default function TradeManager({ setError, bots = [] }) {
             if (peakEq > 0) maxDDpct = Math.max(maxDDpct, ((peakEq - equity) / peakEq) * 100);
         }
 
-        // Avg hold time — use entry order timestamps as fallback for backtest positions
+        // Entry timestamp — use entry order timestamps as fallback for backtest positions
         // whose created_at may be the wall-clock run time, not the candle entry time
-        const holdTimes = closedPositions.map(p => {
-            if (!p.closed_at) return null;
-            const closedTs = new Date(p.closed_at);
+        const entryOf = (p, exitTs) => {
             if (p.created_at) {
                 const createdTs = new Date(p.created_at);
-                if (closedTs > createdTs) return closedTs - createdTs;
+                if (exitTs > createdTs) return createdTs;
             }
             const entryTs = entryTsByPos[p.id];
-            if (entryTs && closedTs > entryTs) return closedTs - entryTs;
+            if (entryTs && exitTs > entryTs) return entryTs;
             return null;
-        }).filter(t => t !== null);
-        const avgHoldMs = holdTimes.length > 0
-            ? holdTimes.reduce((s, t) => s + t, 0) / holdTimes.length
+        };
+        const spans = closedPositions.map(p => {
+            if (!p.closed_at) return null;
+            const exitTs = new Date(p.closed_at);
+            const entryTs = entryOf(p, exitTs);
+            return entryTs ? { start: entryTs.getTime(), end: exitTs.getTime() } : null;
+        }).filter(Boolean);
+        const avgHoldMs = spans.length > 0
+            ? spans.reduce((s, i) => s + (i.end - i.start), 0) / spans.length
             : 0;
+
+        // Longest flat period — an open position is "in the market" indefinitely,
+        // so nothing after its entry can count as flat
+        const openSpans = activePositions.map(p => {
+            const entryTs = entryOf(p, new Date(8.64e15));
+            return entryTs ? { start: entryTs.getTime(), end: Infinity } : null;
+        }).filter(Boolean);
+        const longestFlat = longestFlatGap([...spans, ...openSpans], dateFrom, dateTo);
 
         // Return/Risk (simplified Sharpe)
         const returns = closedPositions.map(p => p.profit_pct || 0);
@@ -585,6 +622,7 @@ export default function TradeManager({ setError, bots = [] }) {
             profitFactor,
             maxDDpct,
             avgHoldMs,
+            longestFlat,
             sharpe,
             totalFees,
             avgWin: wins.length > 0 ? grossProfit / wins.length : 0,
@@ -593,7 +631,7 @@ export default function TradeManager({ setError, bots = [] }) {
             botCount: filteredBotNames.length,
             returnPct: totalCapital > 0 ? (netPnl / totalCapital) * 100 : 0,
         };
-    }, [closedPositions, orders, entryTsByPos, bots]);
+    }, [closedPositions, activePositions, orders, entryTsByPos, bots, dateFrom, dateTo]);
 
     // ── Breakdown tables (by algorithm / by pair) ─────────────────────────────
 
@@ -927,7 +965,7 @@ export default function TradeManager({ setError, bots = [] }) {
             {/* ── STATS GRID ─────────────────────────────────────────────────── */}
             {initialLoading ? (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {Array.from({ length: 10 }).map((_, i) => <Skeleton key={i} className="h-[88px] w-full rounded-lg" />)}
+                    {Array.from({ length: 11 }).map((_, i) => <Skeleton key={i} className="h-[88px] w-full rounded-lg" />)}
                 </div>
             ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -981,6 +1019,14 @@ export default function TradeManager({ setError, bots = [] }) {
                         label="Avg Hold Time"
                         value={stats.total > 0 ? formatHoldTime(stats.avgHoldMs) : '—'}
                         sub="per closed position"
+                        color="white"
+                    />
+                    <StatCard
+                        label="Longest Flat"
+                        value={stats.longestFlat ? formatHoldTime(stats.longestFlat.ms) : '—'}
+                        sub={stats.longestFlat
+                            ? `${fmtShortDate(stats.longestFlat.from)} – ${fmtShortDate(stats.longestFlat.to)}`
+                            : 'no gap between positions'}
                         color="white"
                     />
                     <StatCard
